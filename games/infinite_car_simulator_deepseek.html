@@ -1,0 +1,685 @@
+<!-- Deepseek v3.2 -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Infinite Photorealistic Driving Simulator</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            background: rgba(0,0,0,0.7);
+            padding: 12px 24px;
+            border-radius: 30px;
+            backdrop-filter: blur(5px);
+            border: 1px solid rgba(255,255,255,0.2);
+            pointer-events: none;
+            z-index: 100;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        }
+        #speedometer {
+            font-size: 32px;
+            font-weight: bold;
+            color: #ffaa00;
+            text-shadow: 0 0 10px rgba(255,170,0,0.5);
+            letter-spacing: 2px;
+        }
+        #unit {
+            font-size: 14px;
+            color: #ccc;
+            margin-left: 5px;
+        }
+        #time-indicator {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        #clock {
+            font-family: monospace;
+            font-size: 20px;
+            color: #88ccff;
+        }
+        #headlight-status {
+            color: #ffaa00;
+            font-weight: bold;
+        }
+        #controls-hint {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: rgba(255,255,255,0.6);
+            background: rgba(0,0,0,0.4);
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            backdrop-filter: blur(4px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .key {
+            display: inline-block;
+            background: rgba(255,255,255,0.2);
+            border-radius: 6px;
+            padding: 2px 8px;
+            margin: 0 2px;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <div id="speedometer">0<span id="unit">km/h</span></div>
+        <div id="time-indicator">
+            <span>☀️</span>
+            <span id="clock">12:00</span>
+            <span>🌙</span>
+        </div>
+        <div id="headlight-status">💡 OFF</div>
+    </div>
+    <div id="controls-hint">
+        <span class="key">WASD</span> or <span class="key">↑↓←→</span> to drive · 
+        <span class="key">H</span> headlights · Day/night cycle (24h = 30 min)
+    </div>
+
+    <!-- Import Three.js and OrbitControls (for debug, but we'll use custom camera) -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.128.0/build/three.module.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'https://unpkg.com/three@0.128.0/examples/jsm/controls/OrbitControls.js';
+
+        // --- Setup scene, camera, renderer ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB); // Sky blue
+        scene.fog = new THREE.Fog(0x87CEEB, 200, 500); // Fog for depth
+
+        const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 5, -10); // Will be updated to follow car
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true; // Shadows add realism
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.shadowMap.bias = 0.0001;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.2;
+        document.body.appendChild(renderer.domElement);
+
+        // --- Lighting (day/night cycle will modify these) ---
+        // Ambient light
+        const ambientLight = new THREE.AmbientLight(0x404060); // color will change with time
+        scene.add(ambientLight);
+
+        // Sun (directional light)
+        const sunLight = new THREE.DirectionalLight(0xffeedd, 1.2);
+        sunLight.position.set(50, 100, 50);
+        sunLight.castShadow = true;
+        sunLight.receiveShadow = true;
+        sunLight.shadow.mapSize.width = 2048;
+        sunLight.shadow.mapSize.height = 2048;
+        const d = 150;
+        sunLight.shadow.camera.left = -d;
+        sunLight.shadow.camera.right = d;
+        sunLight.shadow.camera.top = d;
+        sunLight.shadow.camera.bottom = -d;
+        sunLight.shadow.camera.near = 1;
+        sunLight.shadow.camera.far = 200;
+        sunLight.shadow.bias = -0.0005;
+        scene.add(sunLight);
+
+        // Helper for sun position visualization (optional)
+        // scene.add(new THREE.DirectionalLightHelper(sunLight));
+
+        // Car headlights (initially off)
+        const headlightLeft = new THREE.SpotLight(0xffffff, 0);
+        headlightLeft.angle = 0.6;
+        headlightLeft.penumbra = 0.3;
+        headlightLeft.decay = 1;
+        headlightLeft.distance = 80;
+        headlightLeft.castShadow = true;
+        headlightLeft.shadow.mapSize.width = 512;
+        headlightLeft.shadow.mapSize.height = 512;
+        headlightLeft.shadow.bias = -0.001;
+
+        const headlightRight = new THREE.SpotLight(0xffffff, 0);
+        headlightRight.angle = 0.6;
+        headlightRight.penumbra = 0.3;
+        headlightRight.decay = 1;
+        headlightRight.distance = 80;
+        headlightRight.castShadow = true;
+        headlightRight.shadow.mapSize.width = 512;
+        headlightRight.shadow.mapSize.height = 512;
+        headlightRight.shadow.bias = -0.001;
+
+        scene.add(headlightLeft);
+        scene.add(headlightRight);
+
+        // --- Car model (photorealistic sedan using primitives with materials) ---
+        const carGroup = new THREE.Group();
+
+        // Car body (main)
+        const bodyGeo = new THREE.BoxGeometry(2.2, 0.6, 4.5);
+        const bodyMat = new THREE.MeshStandardMaterial({ color: 0x3355aa, roughness: 0.3, metalness: 0.7, emissive: 0x000000 });
+        const body = new THREE.Mesh(bodyGeo, bodyMat);
+        body.position.y = 0.5;
+        body.castShadow = true;
+        body.receiveShadow = true;
+        carGroup.add(body);
+
+        // Cabin (top)
+        const cabinGeo = new THREE.BoxGeometry(1.6, 0.5, 2.0);
+        const cabinMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.2, metalness: 0.1, emissive: 0x000000 });
+        const cabin = new THREE.Mesh(cabinGeo, cabinMat);
+        cabin.position.set(0, 1.0, -0.2);
+        cabin.castShadow = true;
+        cabin.receiveShadow = true;
+        carGroup.add(cabin);
+
+        // Windshield (glass)
+        const glassGeo = new THREE.BoxGeometry(1.5, 0.3, 1.0);
+        const glassMat = new THREE.MeshStandardMaterial({ color: 0x88aaff, roughness: 0.1, metalness: 0.1, emissive: 0x000000, transparent: true, opacity: 0.7 });
+        const glass = new THREE.Mesh(glassGeo, glassMat);
+        glass.position.set(0, 1.2, 0.8);
+        glass.castShadow = true;
+        glass.receiveShadow = true;
+        carGroup.add(glass);
+
+        // Hood details
+        const hoodGeo = new THREE.BoxGeometry(1.8, 0.2, 1.2);
+        const hoodMat = new THREE.MeshStandardMaterial({ color: 0x3355aa, roughness: 0.4, metalness: 0.5 });
+        const hood = new THREE.Mesh(hoodGeo, hoodMat);
+        hood.position.set(0, 0.9, 1.2);
+        hood.castShadow = true;
+        hood.receiveShadow = true;
+        carGroup.add(hood);
+
+        // Wheels
+        const wheelPositions = [
+            [-1.0, 0.3, 1.3],
+            [1.0, 0.3, 1.3],
+            [-1.0, 0.3, -1.3],
+            [1.0, 0.3, -1.3]
+        ];
+        const wheelMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.7, metalness: 0.2 });
+        const rimMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.4, metalness: 0.8 });
+        
+        wheelPositions.forEach(pos => {
+            const wheelGroup = new THREE.Group();
+            
+            const tireGeo = new THREE.CylinderGeometry(0.5, 0.5, 0.4, 24);
+            const tire = new THREE.Mesh(tireGeo, wheelMat);
+            tire.rotation.z = Math.PI/2;
+            tire.castShadow = true;
+            tire.receiveShadow = true;
+            wheelGroup.add(tire);
+            
+            const rimGeo = new THREE.CylinderGeometry(0.35, 0.35, 0.41, 8);
+            const rim = new THREE.Mesh(rimGeo, rimMat);
+            rim.rotation.z = Math.PI/2;
+            rim.castShadow = true;
+            rim.receiveShadow = true;
+            wheelGroup.add(rim);
+            
+            wheelGroup.position.set(pos[0], pos[1], pos[2]);
+            carGroup.add(wheelGroup);
+        });
+
+        // Headlight lenses
+        const lensMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x442200, roughness: 0.2, metalness: 0.1 });
+        const lensGeo = new THREE.SphereGeometry(0.2, 16, 16);
+        const lensLeft = new THREE.Mesh(lensGeo, lensMat);
+        lensLeft.position.set(-0.8, 0.6, 2.1);
+        carGroup.add(lensLeft);
+        const lensRight = new THREE.Mesh(lensGeo, lensMat);
+        lensRight.position.set(0.8, 0.6, 2.1);
+        carGroup.add(lensRight);
+
+        // Taillights
+        const tailMat = new THREE.MeshStandardMaterial({ color: 0xff3333, emissive: 0x330000 });
+        const tailGeo = new THREE.BoxGeometry(0.3, 0.2, 0.2);
+        const tailLeft = new THREE.Mesh(tailGeo, tailMat);
+        tailLeft.position.set(-0.9, 0.5, -2.0);
+        carGroup.add(tailLeft);
+        const tailRight = new THREE.Mesh(tailGeo, tailMat);
+        tailRight.position.set(0.9, 0.5, -2.0);
+        carGroup.add(tailRight);
+
+        carGroup.position.set(0, 0.2, 0);
+        carGroup.rotation.y = Math.PI; // Face forward along -Z? Actually we want to face +Z? Let's set so front is +Z
+        // Adjust: currently front is where headlights are at +Z? Headlights at +2.1z, so front is +Z. Good.
+        scene.add(carGroup);
+
+        // Attach headlights to car (as children so they move with car, but we need them at front)
+        // We'll position them relative to car and add as children, then later we can toggle intensity.
+        headlightLeft.position.set(-0.8, 0.8, 2.3);
+        headlightRight.position.set(0.8, 0.8, 2.3);
+        carGroup.add(headlightLeft);
+        carGroup.add(headlightRight);
+
+        // Also add small red marker lights at back
+        const markerMat = new THREE.MeshStandardMaterial({ color: 0xff0000, emissive: 0x220000 });
+        const markerGeo = new THREE.SphereGeometry(0.15, 8);
+        const markerLeft = new THREE.Mesh(markerGeo, markerMat);
+        markerLeft.position.set(-0.9, 0.4, -2.1);
+        carGroup.add(markerLeft);
+        const markerRight = new THREE.Mesh(markerGeo, markerMat);
+        markerRight.position.set(0.9, 0.4, -2.1);
+        carGroup.add(markerRight);
+
+        // --- World generation parameters ---
+        const CHUNK_SIZE = 100; // Size of each square chunk
+        const VIEW_DISTANCE = 300; // How far to generate chunks
+        const chunks = new Map(); // key "x,z" to chunk objects
+
+        // Helper to generate a chunk at given coordinates (world position of center)
+        function generateChunk(cx, cz) {
+            const key = `${cx},${cz}`;
+            if (chunks.has(key)) return;
+            
+            const chunkGroup = new THREE.Group();
+            const half = CHUNK_SIZE / 2;
+            
+            // Ground plane with field texture (procedural)
+            const groundGeo = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE);
+            // Create a canvas texture for ground (simple grass pattern)
+            const canvas = document.createElement('canvas');
+            canvas.width = 512;
+            canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#3c5e3a';
+            ctx.fillRect(0, 0, 512, 512);
+            // Add some noise
+            for (let i = 0; i < 5000; i++) {
+                ctx.fillStyle = i % 2 === 0 ? '#4a6b3f' : '#2e4a2c';
+                ctx.fillRect(Math.floor(Math.random()*512), Math.floor(Math.random()*512), 4, 4);
+            }
+            const groundTexture = new THREE.CanvasTexture(canvas);
+            groundTexture.wrapS = THREE.RepeatWrapping;
+            groundTexture.wrapT = THREE.RepeatWrapping;
+            groundTexture.repeat.set(10, 10);
+            
+            const groundMat = new THREE.MeshStandardMaterial({ map: groundTexture, roughness: 0.9, metalness: 0.1 });
+            const ground = new THREE.Mesh(groundGeo, groundMat);
+            ground.rotation.x = -Math.PI / 2;
+            ground.position.set(cx, 0, cz);
+            ground.receiveShadow = true;
+            chunkGroup.add(ground);
+
+            // Road (straight along Z axis, width 8)
+            const roadGeo = new THREE.PlaneGeometry(8, CHUNK_SIZE);
+            // Road texture
+            const roadCanvas = document.createElement('canvas');
+            roadCanvas.width = 512;
+            roadCanvas.height = 512;
+            const rctx = roadCanvas.getContext('2d');
+            rctx.fillStyle = '#2a2a2a';
+            rctx.fillRect(0, 0, 512, 512);
+            // Lane markings
+            rctx.strokeStyle = '#ffffff';
+            rctx.lineWidth = 20;
+            rctx.setLineDash([30, 30]);
+            rctx.beginPath();
+            rctx.moveTo(256, 0);
+            rctx.lineTo(256, 512);
+            rctx.stroke();
+            // Side lines
+            rctx.setLineDash([]);
+            rctx.lineWidth = 10;
+            rctx.strokeStyle = '#aaaaaa';
+            rctx.strokeRect(50, 0, 10, 512);
+            rctx.strokeRect(452, 0, 10, 512);
+            
+            const roadTexture = new THREE.CanvasTexture(roadCanvas);
+            roadTexture.wrapS = THREE.RepeatWrapping;
+            roadTexture.wrapT = THREE.RepeatWrapping;
+            roadTexture.repeat.set(1, 20);
+            
+            const roadMat = new THREE.MeshStandardMaterial({ map: roadTexture, roughness: 0.7, metalness: 0.2 });
+            const road = new THREE.Mesh(roadGeo, roadMat);
+            road.rotation.x = -Math.PI / 2;
+            road.position.set(cx, 0.01, cz); // Slightly above ground
+            road.receiveShadow = true;
+            chunkGroup.add(road);
+
+            // Random objects: trees, buildings, animals, etc.
+            const numObjects = 30; // per chunk
+            for (let i = 0; i < numObjects; i++) {
+                // Random position within chunk, but avoid road area
+                let x = cx + (Math.random() - 0.5) * CHUNK_SIZE * 0.9;
+                let z = cz + (Math.random() - 0.5) * CHUNK_SIZE * 0.9;
+                // Keep away from road (|x - cx| > 6)
+                if (Math.abs(x - cx) < 6) continue;
+                
+                const type = Math.random();
+                if (type < 0.4) {
+                    // Tree
+                    const treeGroup = new THREE.Group();
+                    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x8B5A2B, roughness: 0.8 });
+                    const foliageMat = new THREE.MeshStandardMaterial({ color: 0x2E8B57, roughness: 0.4 });
+                    
+                    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.6, 2), trunkMat);
+                    trunk.position.y = 1;
+                    trunk.castShadow = true;
+                    trunk.receiveShadow = true;
+                    treeGroup.add(trunk);
+                    
+                    const foliage1 = new THREE.Mesh(new THREE.ConeGeometry(1.0, 1.5, 8), foliageMat);
+                    foliage1.position.y = 2.5;
+                    foliage1.castShadow = true;
+                    foliage1.receiveShadow = true;
+                    treeGroup.add(foliage1);
+                    
+                    const foliage2 = new THREE.Mesh(new THREE.ConeGeometry(0.8, 1.2, 8), foliageMat);
+                    foliage2.position.y = 3.7;
+                    foliage2.castShadow = true;
+                    foliage2.receiveShadow = true;
+                    treeGroup.add(foliage2);
+                    
+                    treeGroup.position.set(x, 0, z);
+                    chunkGroup.add(treeGroup);
+                } else if (type < 0.7) {
+                    // Building (simple)
+                    const height = 1 + Math.random() * 3;
+                    const width = 2 + Math.random() * 3;
+                    const depth = 2 + Math.random() * 3;
+                    const buildingMat = new THREE.MeshStandardMaterial({ color: Math.random() * 0xffffff, roughness: 0.6 });
+                    const building = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), buildingMat);
+                    building.position.set(x, height/2, z);
+                    building.castShadow = true;
+                    building.receiveShadow = true;
+                    chunkGroup.add(building);
+                    
+                    // Roof
+                    const roofMat = new THREE.MeshStandardMaterial({ color: 0x884422 });
+                    const roof = new THREE.Mesh(new THREE.ConeGeometry(width*0.7, 0.8, 4), roofMat);
+                    roof.position.set(x, height, z);
+                    roof.castShadow = true;
+                    roof.receiveShadow = true;
+                    chunkGroup.add(roof);
+                } else if (type < 0.9) {
+                    // Animal (simple sphere + cylinder legs)
+                    const animalGroup = new THREE.Group();
+                    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xccaa88, roughness: 0.7 });
+                    const body = new THREE.Mesh(new THREE.SphereGeometry(0.5, 8), bodyMat);
+                    body.position.y = 0.5;
+                    body.castShadow = true;
+                    body.receiveShadow = true;
+                    animalGroup.add(body);
+                    
+                    const headMat = new THREE.MeshStandardMaterial({ color: 0xccaa88 });
+                    const head = new THREE.Mesh(new THREE.SphereGeometry(0.3, 6), headMat);
+                    head.position.set(0.6, 0.7, 0);
+                    head.castShadow = true;
+                    head.receiveShadow = true;
+                    animalGroup.add(head);
+                    
+                    // Legs
+                    const legMat = new THREE.MeshStandardMaterial({ color: 0xaa8866 });
+                    for (let j = 0; j < 4; j++) {
+                        const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.4), legMat);
+                        leg.position.set((j%2===0?0.3:-0.3), 0.2, (j<2?0.3:-0.3));
+                        leg.castShadow = true;
+                        leg.receiveShadow = true;
+                        animalGroup.add(leg);
+                    }
+                    
+                    animalGroup.position.set(x, 0, z);
+                    animalGroup.rotation.y = Math.random() * Math.PI * 2;
+                    chunkGroup.add(animalGroup);
+                } else {
+                    // Rock or bush
+                    const rockMat = new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.9 });
+                    const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.5 + Math.random()*0.5), rockMat);
+                    rock.position.set(x, 0.3, z);
+                    rock.castShadow = true;
+                    rock.receiveShadow = true;
+                    chunkGroup.add(rock);
+                }
+            }
+
+            // Add some distant mountain silhouettes (large low-poly meshes) at far edges
+            if (Math.random() > 0.5) {
+                const mountainGroup = new THREE.Group();
+                const mMat = new THREE.MeshStandardMaterial({ color: 0x6a6a6a, roughness: 0.7, emissive: 0x111111 });
+                const m1 = new THREE.Mesh(new THREE.ConeGeometry(15, 20, 8), mMat);
+                m1.position.set(cx + 40, 0, cz + 30);
+                m1.castShadow = true;
+                m1.receiveShadow = true;
+                mountainGroup.add(m1);
+                const m2 = new THREE.Mesh(new THREE.ConeGeometry(12, 18, 8), mMat);
+                m2.position.set(cx + 20, 0, cz + 40);
+                m2.castShadow = true;
+                m2.receiveShadow = true;
+                mountainGroup.add(m2);
+                mountainGroup.position.y = 5;
+                chunkGroup.add(mountainGroup);
+            }
+
+            // Add a lake (flat blue plane) occasionally
+            if (Math.random() > 0.7) {
+                const lakeGeo = new THREE.CircleGeometry(10 + Math.random()*10, 16);
+                const lakeMat = new THREE.MeshStandardMaterial({ color: 0x3399ff, transparent: true, opacity: 0.6, roughness: 0.2, metalness: 0.1 });
+                const lake = new THREE.Mesh(lakeGeo, lakeMat);
+                lake.rotation.x = -Math.PI/2;
+                lake.position.set(cx + (Math.random()-0.5)*30, 0.02, cz + (Math.random()-0.5)*30);
+                lake.receiveShadow = true;
+                chunkGroup.add(lake);
+            }
+
+            scene.add(chunkGroup);
+            chunks.set(key, chunkGroup);
+        }
+
+        // Remove chunks far away
+        function removeFarChunks(centerX, centerZ) {
+            chunks.forEach((group, key) => {
+                const [x, z] = key.split(',').map(Number);
+                if (Math.abs(x - centerX) > VIEW_DISTANCE || Math.abs(z - centerZ) > VIEW_DISTANCE) {
+                    scene.remove(group);
+                    chunks.delete(key);
+                }
+            });
+        }
+
+        // Update chunks based on car position
+        function updateChunks(carX, carZ) {
+            const chunkX = Math.round(carX / CHUNK_SIZE) * CHUNK_SIZE;
+            const chunkZ = Math.round(carZ / CHUNK_SIZE) * CHUNK_SIZE;
+            
+            // Generate chunks in a grid around current chunk
+            for (let dx = -VIEW_DISTANCE; dx <= VIEW_DISTANCE; dx += CHUNK_SIZE) {
+                for (let dz = -VIEW_DISTANCE; dz <= VIEW_DISTANCE; dz += CHUNK_SIZE) {
+                    const cx = chunkX + dx;
+                    const cz = chunkZ + dz;
+                    generateChunk(cx, cz);
+                }
+            }
+            removeFarChunks(carX, carZ);
+        }
+
+        // Initial chunks
+        updateChunks(0, 0);
+
+        // --- Day/Night cycle variables ---
+        let timeOfDay = 12; // 24-hour clock, 0-24
+        const dayLengthSeconds = 30 * 60; // 30 minutes real time for a full day
+        let lastTime = performance.now();
+
+        // --- Car control variables ---
+        const speed = { current: 0, max: 80, acceleration: 20, deceleration: 15, turnSpeed: 1.5 };
+        const keys = { w: false, a: false, s: false, d: false, up: false, down: false, left: false, right: false, h: false };
+        let headlightsOn = false;
+
+        window.addEventListener('keydown', (e) => {
+            switch(e.code) {
+                case 'KeyW': keys.w = true; e.preventDefault(); break;
+                case 'KeyA': keys.a = true; e.preventDefault(); break;
+                case 'KeyS': keys.s = true; e.preventDefault(); break;
+                case 'KeyD': keys.d = true; e.preventDefault(); break;
+                case 'ArrowUp': keys.up = true; e.preventDefault(); break;
+                case 'ArrowDown': keys.down = true; e.preventDefault(); break;
+                case 'ArrowLeft': keys.left = true; e.preventDefault(); break;
+                case 'ArrowRight': keys.right = true; e.preventDefault(); break;
+                case 'KeyH': 
+                    keys.h = !keys.h; 
+                    headlightsOn = keys.h;
+                    headlightLeft.intensity = headlightsOn ? 1.5 : 0;
+                    headlightRight.intensity = headlightsOn ? 1.5 : 0;
+                    document.getElementById('headlight-status').innerHTML = headlightsOn ? '💡 ON' : '💡 OFF';
+                    e.preventDefault(); 
+                    break;
+            }
+        });
+        window.addEventListener('keyup', (e) => {
+            switch(e.code) {
+                case 'KeyW': keys.w = false; e.preventDefault(); break;
+                case 'KeyA': keys.a = false; e.preventDefault(); break;
+                case 'KeyS': keys.s = false; e.preventDefault(); break;
+                case 'KeyD': keys.d = false; e.preventDefault(); break;
+                case 'ArrowUp': keys.up = false; e.preventDefault(); break;
+                case 'ArrowDown': keys.down = false; e.preventDefault(); break;
+                case 'ArrowLeft': keys.left = false; e.preventDefault(); break;
+                case 'ArrowRight': keys.right = false; e.preventDefault(); break;
+            }
+        });
+
+        // --- Camera follow ---
+        function updateCamera() {
+            const carPos = carGroup.position.clone();
+            const carDir = new THREE.Vector3(0, 0, 1).applyQuaternion(carGroup.quaternion);
+            const camOffset = new THREE.Vector3(0, 2.5, -8); // behind car
+            camOffset.applyQuaternion(carGroup.quaternion);
+            camera.position.copy(carPos.clone().add(camOffset));
+            camera.lookAt(carPos.clone().add(carDir.multiplyScalar(5)));
+        }
+
+        // --- Speedometer update ---
+        function updateSpeedometer() {
+            const spd = Math.abs(speed.current);
+            document.getElementById('speedometer').innerHTML = Math.floor(spd) + '<span id="unit">km/h</span>';
+        }
+
+        // --- Clock update ---
+        function updateClock() {
+            const hours = Math.floor(timeOfDay);
+            const minutes = Math.floor((timeOfDay % 1) * 60);
+            const ampm = hours >= 12 ? 'PM' : 'AM';
+            const displayHours = hours % 12 || 12;
+            const displayMinutes = minutes < 10 ? '0' + minutes : minutes;
+            document.getElementById('clock').innerHTML = `${displayHours}:${displayMinutes} ${ampm}`;
+            
+            // Update lighting based on time
+            // Sun angle: 0 at midnight (low), 12 at noon (high)
+            const sunAngle = (timeOfDay / 24) * Math.PI * 2 - Math.PI/2; // 0 at midnight? Let's set noon at highest
+            const sunHeight = Math.sin(sunAngle) * 100;
+            const sunHoriz = Math.cos(sunAngle) * 100;
+            sunLight.position.set(sunHoriz, Math.max(5, sunHeight + 50), 50); // Keep some light
+            
+            // Color and intensity
+            const intensity = Math.max(0.2, Math.sin(sunAngle) * 1.2);
+            sunLight.intensity = intensity;
+            ambientLight.intensity = 0.2 + intensity * 0.3;
+            
+            // Sky color
+            if (sunHeight < 10) {
+                scene.background.setHSL(0.6, 0.8, 0.1); // night
+                scene.fog.color.copy(scene.background);
+            } else {
+                scene.background.setHSL(0.58, 0.8, 0.6); // day
+                scene.fog.color.copy(scene.background);
+            }
+        }
+
+        // --- Animation loop ---
+        const clock = new THREE.Clock();
+
+        function animate() {
+            const delta = Math.min(clock.getDelta(), 0.1); // seconds
+            const now = performance.now();
+            
+            // Update time of day (24h in 30 min real = 48x speed)
+            timeOfDay += (delta * 48) / 3600; // 48x speed, convert to hours
+            if (timeOfDay >= 24) timeOfDay -= 24;
+            updateClock();
+
+            // Car controls
+            const forward = keys.w || keys.up ? 1 : (keys.s || keys.down ? -1 : 0);
+            const turn = keys.a || keys.left ? 1 : (keys.d || keys.right ? -1 : 0);
+            
+            // Acceleration
+            if (forward !== 0) {
+                speed.current += forward * speed.acceleration * delta;
+                speed.current = Math.min(Math.max(speed.current, -speed.max/2), speed.max);
+            } else {
+                // decelerate
+                if (speed.current > 0) {
+                    speed.current = Math.max(0, speed.current - speed.deceleration * delta);
+                } else if (speed.current < 0) {
+                    speed.current = Math.min(0, speed.current + speed.deceleration * delta);
+                }
+            }
+            
+            // Turn
+            if (turn !== 0 && Math.abs(speed.current) > 0.5) {
+                const turnAmount = turn * speed.turnSpeed * delta * (speed.current / speed.max);
+                carGroup.rotation.y += turnAmount;
+            }
+            
+            // Move car
+            const moveDir = new THREE.Vector3(0, 0, 1).applyQuaternion(carGroup.quaternion);
+            carGroup.position.addScaledVector(moveDir, speed.current * delta * 0.5); // Scale speed to look good
+            
+            // Update chunks
+            updateChunks(carGroup.position.x, carGroup.position.z);
+            
+            // Camera
+            updateCamera();
+            
+            // Speedometer
+            updateSpeedometer();
+
+            renderer.render(scene, camera);
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Add some stars or moon? Not necessary but could be nice.
+        // Simple starfield for night
+        const starsGeometry = new THREE.BufferGeometry();
+        const starsCount = 1000;
+        const starsPositions = new Float32Array(starsCount * 3);
+        for (let i = 0; i < starsCount * 3; i += 3) {
+            starsPositions[i] = (Math.random() - 0.5) * 1000;
+            starsPositions[i+1] = (Math.random() - 0.5) * 500 + 200;
+            starsPositions[i+2] = (Math.random() - 0.5) * 1000;
+        }
+        starsGeometry.setAttribute('position', new THREE.BufferAttribute(starsPositions, 3));
+        const starsMaterial = new THREE.PointsMaterial({ color: 0xffffff, size: 0.5 });
+        const stars = new THREE.Points(starsGeometry, starsMaterial);
+        scene.add(stars);
+
+        console.log('Driving simulator started. Use WASD or arrows to drive, H for headlights.');
+    </script>
+</body>
+</html>
